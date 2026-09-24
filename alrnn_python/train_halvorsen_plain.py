@@ -16,6 +16,21 @@ def parse_args():
         default="/export/home/klenkeit/training_data/single_halvorsen_constparams/just14_noisy_trajectories",
         help="Directory containing trajectories.npy.",
     )
+    parser.add_argument(
+        "--multi-trajectory",
+        action="store_true",
+        help="Use all trajectories in trajectories.npy instead of one trajectory.",
+    )
+    parser.add_argument(
+        "--use-phi",
+        action="store_true",
+        help="Load trajectory_phi.npy and feed phi through the C phi_t term.",
+    )
+    parser.add_argument(
+        "--no-balanced-phi",
+        action="store_true",
+        help="Disable balanced per-phi sampling for multi-trajectory data.",
+    )
     parser.add_argument("--trajectory-id", type=int, default=0)
     parser.add_argument("--split-idx", type=int, default=80000)
     parser.add_argument("--latent-dim", "-M", type=int, default=20)
@@ -81,8 +96,151 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import trange
 
-from dataset import TimeSeriesDataset
 from metrics import power_spectrum_error, state_space_divergence_binning
+
+
+class SingleTrajectoryDataset:
+    def __init__(self, data, external_inputs=None, sequence_length=200, batch_size=16):
+        self.X = torch.tensor(data, dtype=torch.float32)
+        self.total_time_steps = self.X.shape[0]
+        self.sequence_length = sequence_length
+        self.batch_size = batch_size
+        if external_inputs is not None:
+            self.S = torch.tensor(external_inputs, dtype=torch.float32)
+            assert self.X.size(0) == self.S.size(0)
+        else:
+            self.S = None
+
+    def __len__(self):
+        return self.total_time_steps - self.sequence_length - 1
+
+    def __getitem__(self, t):
+        x = self.X[t : t + self.sequence_length, :]
+        y = self.X[t + 1 : t + self.sequence_length + 1, :]
+        if self.S is None:
+            return x, y, None
+        s = self.S[t : t + self.sequence_length, :]
+        return x, y, s
+
+    def sample_batch(self):
+        X, Y, S = [], [], []
+        for _ in range(self.batch_size):
+            idx = np.random.randint(0, len(self))
+            x, y, s = self[idx]
+            X.append(x)
+            Y.append(y)
+            S.append(s)
+        if S[0] is None:
+            return torch.stack(X), torch.stack(Y), None
+        return torch.stack(X), torch.stack(Y), torch.stack(S)
+
+    def eval_reference(self, length=10000, trajectory_index=0):
+        x_ref = self.X[:length]
+        if self.S is None:
+            return x_ref, None
+        return x_ref, self.S[:length]
+
+
+class MultiTrajectoryDataset:
+    def __init__(
+        self,
+        data,
+        external_inputs=None,
+        phi_constants=None,
+        sequence_length=200,
+        batch_size=20,
+        split_idx=80000,
+        balanced_phi=True,
+    ):
+        self.X = torch.tensor(data[:, :split_idx, :], dtype=torch.float32)
+        self.X_test = torch.tensor(data[:, split_idx:, :], dtype=torch.float32)
+        self.num_trajectories, self.total_time_steps, _ = self.X.shape
+        self.sequence_length = sequence_length
+        self.batch_size = batch_size
+        self.balanced_phi = balanced_phi
+
+        if external_inputs is not None:
+            self.S = torch.tensor(external_inputs[:, :split_idx, :], dtype=torch.float32)
+            self.S_test = torch.tensor(
+                external_inputs[:, split_idx:, :], dtype=torch.float32
+            )
+            assert self.X.shape[:2] == self.S.shape[:2]
+        else:
+            self.S = None
+            self.S_test = None
+
+        if phi_constants is None:
+            self.phi_constants = np.arange(self.num_trajectories)
+        else:
+            self.phi_constants = np.asarray(phi_constants)
+        self.unique_phi = np.unique(self.phi_constants)
+        self.indices_by_phi = {
+            phi: np.where(self.phi_constants == phi)[0] for phi in self.unique_phi
+        }
+
+    def __len__(self):
+        return self.num_trajectories * (self.total_time_steps - self.sequence_length - 1)
+
+    def _sample_one(self, trajectory_index):
+        max_start = self.total_time_steps - self.sequence_length - 1
+        start = np.random.randint(0, max_start)
+        x = self.X[trajectory_index, start : start + self.sequence_length, :]
+        y = self.X[
+            trajectory_index, start + 1 : start + self.sequence_length + 1, :
+        ]
+        if self.S is None:
+            return x, y, None
+        s = self.S[trajectory_index, start : start + self.sequence_length, :]
+        return x, y, s
+
+    def _balanced_trajectory_indices(self):
+        phis = list(self.unique_phi)
+        base = self.batch_size // len(phis)
+        remainder = self.batch_size % len(phis)
+        selected = []
+        shuffled_phi_positions = np.random.permutation(len(phis))
+        counts = {phi: base for phi in phis}
+        for position in shuffled_phi_positions[:remainder]:
+            counts[phis[position]] += 1
+        for phi in phis:
+            pool = self.indices_by_phi[phi]
+            selected.extend(np.random.choice(pool, size=counts[phi], replace=True))
+        np.random.shuffle(selected)
+        return selected
+
+    def sample_batch(self):
+        if self.balanced_phi and len(self.unique_phi) > 1:
+            trajectory_indices = self._balanced_trajectory_indices()
+        else:
+            trajectory_indices = np.random.randint(
+                0, self.num_trajectories, size=self.batch_size
+            )
+        X, Y, S = [], [], []
+        for trajectory_index in trajectory_indices:
+            x, y, s = self._sample_one(int(trajectory_index))
+            X.append(x)
+            Y.append(y)
+            S.append(s)
+        if S[0] is None:
+            return torch.stack(X), torch.stack(Y), None
+        return torch.stack(X), torch.stack(Y), torch.stack(S)
+
+    def eval_reference(self, length=10000, trajectory_index=0):
+        x_ref = self.X[int(trajectory_index), :length, :]
+        if self.S is None:
+            return x_ref, None
+        return x_ref, self.S[int(trajectory_index), :length, :]
+
+    def test_trajectory(self, trajectory_index, length=None):
+        x = self.X_test[int(trajectory_index)]
+        if length is not None:
+            x = x[:length]
+        if self.S_test is None:
+            return x, None
+        s = self.S_test[int(trajectory_index)]
+        if length is not None:
+            s = s[:length]
+        return x, s
 
 
 class AL_RNN(nn.Module):
@@ -212,20 +370,17 @@ def train_sh(
 
             if e % ssi == 0:
                 with torch.no_grad():
-                    s_test = (
-                        dataset.S.clone().detach()[0:10000, :].unsqueeze(1).to(device)
-                        if dataset.S is not None
-                        else None
+                    x_ref, s_ref = dataset.eval_reference(length=10000)
+                    s_test = s_ref.unsqueeze(1).to(device) if s_ref is not None else None
+                    x0_test = x_ref[0:1, :].to(device)
+                    z_test = predict_free_sequence(
+                        model, x0_test, x_ref.shape[0], s_test
                     )
-                    x0_test = dataset.X.clone().detach()[0:1, :].to(device)
-                    z_test = predict_free_sequence(model, x0_test, 10000, s_test)
                     z_test_obs = z_test[0, :, 0 : model.N].detach().cpu()
-                    x_train_cpu = dataset.X.clone().detach().cpu()
-                    klx.append(state_space_divergence_binning(z_test_obs, x_train_cpu))
+                    x_ref_cpu = x_ref.detach().cpu()
+                    klx.append(state_space_divergence_binning(z_test_obs, x_ref_cpu))
                     last_dstsp = klx[-1]
-                    dh.append(
-                        power_spectrum_error(z_test_obs, x_train_cpu[0:10000, :])
-                    )
+                    dh.append(power_spectrum_error(z_test_obs, x_ref_cpu))
                     if torch.argmin(torch.tensor(klx)) + 1 == len(torch.tensor(klx)):
                         best_model = copy.deepcopy(model)
 
@@ -251,29 +406,63 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    trajectories = np.load(Path(args.data_dir) / "trajectories.npy").astype(np.float32)
-    X = trajectories[args.trajectory_id]
-    X_train = X[: args.split_idx]
-    X_test = X[args.split_idx :]
-    phi_train = None
-    phi_test = None
-    phi_dim = 0
+    data_dir = Path(args.data_dir)
+    trajectories = np.load(data_dir / "trajectories.npy").astype(np.float32)
+    all_phi = (
+        np.load(data_dir / "trajectory_phi.npy").astype(np.float32)
+        if args.use_phi
+        else None
+    )
+    phi_constants_path = data_dir / "trajectory_phi_constants.npy"
+    phi_constants = (
+        np.load(phi_constants_path).astype(np.float32)
+        if phi_constants_path.exists()
+        else None
+    )
 
-    T_train, N = X_train.shape
-    T_test = X_test.shape[0]
-    print("X_train:", X_train.shape, "X_test:", X_test.shape)
+    if args.multi_trajectory:
+        X_train_shape = trajectories[:, : args.split_idx, :].shape
+        X_test_shape = trajectories[:, args.split_idx :, :].shape
+        phi_dim = 0 if all_phi is None else all_phi.shape[-1]
+        dataset = MultiTrajectoryDataset(
+            trajectories,
+            external_inputs=all_phi,
+            phi_constants=phi_constants,
+            sequence_length=args.sequence_length,
+            batch_size=args.batch_size,
+            split_idx=args.split_idx,
+            balanced_phi=not args.no_balanced_phi,
+        )
+        T_train = X_train_shape[1]
+        T_test = X_test_shape[1]
+        N = X_train_shape[-1]
+        print("Multi-trajectory mode")
+        print("X_train:", X_train_shape, "X_test:", X_test_shape)
+        print("unique phi:", dataset.unique_phi)
+        print("balanced phi sampling:", dataset.balanced_phi)
+    else:
+        X = trajectories[args.trajectory_id]
+        X_train = X[: args.split_idx]
+        X_test = X[args.split_idx :]
+        phi_single = all_phi[args.trajectory_id] if all_phi is not None else None
+        phi_train = phi_single[: args.split_idx] if phi_single is not None else None
+        phi_test = phi_single[args.split_idx :] if phi_single is not None else None
+        phi_dim = 0 if phi_train is None else phi_train.shape[-1]
+        dataset = SingleTrajectoryDataset(
+            X_train,
+            external_inputs=phi_train,
+            sequence_length=args.sequence_length,
+            batch_size=args.batch_size,
+        )
+        T_train, N = X_train.shape
+        T_test = X_test.shape[0]
+        print("Single-trajectory mode")
+        print("X_train:", X_train.shape, "X_test:", X_test.shape)
 
     model = AL_RNN(M=args.latent_dim, P=args.pwl_units, N=N, phi_dim=phi_dim).to(
         device
     )
     model_path = output_dir / "model.pt"
-    dataset = TimeSeriesDataset(
-        X_train,
-        external_inputs=phi_train,
-        sequence_length=args.sequence_length,
-        batch_size=args.batch_size,
-    )
-
     if args.eval_only:
         print("Eval-only mode: loading model from", model_path)
         model.load_state_dict(torch.load(model_path, map_location=device))
@@ -301,57 +490,119 @@ def main():
 
         torch.save(model.state_dict(), model_path)
 
-    X_test_torch = torch.tensor(X_test[:], device=device).unsqueeze(0)
-    phi_test_torch = (
-        torch.tensor(phi_test[: args.t_gen + args.t_transient], device=device).unsqueeze(
-            1
+    def evaluate_test_trajectory(x_test_tensor, phi_test_tensor, label, file_stem):
+        horizon = min(args.t_gen, x_test_tensor.shape[0] - args.t_transient)
+        total_steps = horizon + args.t_transient
+        x_test_torch = x_test_tensor[:total_steps].to(device).unsqueeze(0)
+        phi_test_torch = (
+            phi_test_tensor[:total_steps].to(device).unsqueeze(1)
+            if phi_test_tensor is not None
+            else None
         )
-        if phi_test is not None
-        else None
-    )
-    orbit = (
-        predict_free_sequence(
-            model,
-            X_test_torch[:, 0, :],
-            args.t_gen + args.t_transient,
-            phi_test_torch,
+        orbit = (
+            predict_free_sequence(
+                model,
+                x_test_torch[:, 0, :],
+                total_steps,
+                phi_test_torch,
+            )
+            .detach()
+            .cpu()
+            .numpy()[0][args.t_transient :, :]
         )
-        .detach()
-        .cpu()
-        .numpy()[0][args.t_transient :, :]
-    )
+        x_truth = x_test_tensor[args.t_transient : args.t_transient + horizon].cpu()
+        dstsp = state_space_divergence_binning(
+            torch.tensor(orbit[:, 0 : model.N]), x_truth
+        )
+        dh = power_spectrum_error(torch.tensor(orbit[:, 0 : model.N]), x_truth)
+        orbit_finite = bool(np.isfinite(orbit).all())
+        print(
+            f"{label} | Dstsp={dstsp:.6f} | DH={dh:.6f} | "
+            f"finite={orbit_finite} | min={float(np.nanmin(orbit)):.6f} | "
+            f"max={float(np.nanmax(orbit)):.6f}"
+        )
 
-    dstsp = state_space_divergence_binning(
-        torch.tensor(orbit[:, 0 : model.N]), X_test_torch[0, :, :].detach().cpu()
-    )
-    dh = power_spectrum_error(
-        torch.tensor(orbit[:, 0 : model.N]),
-        X_test_torch[0, 0 : args.t_gen, :].detach().cpu(),
-    )
-    orbit_finite = bool(np.isfinite(orbit).all())
-    print("State space distance (Dstsp):", dstsp)
-    print("Hellinger Distance (DH):", dh)
-    print(
-        "Orbit finite/min/max:",
-        orbit_finite,
-        float(np.nanmin(orbit)),
-        float(np.nanmax(orbit)),
-    )
+        fig = plt.figure(figsize=(7, 5))
+        ax = fig.add_subplot(111, projection="3d")
+        x_truth_np = x_truth.numpy()
+        ax.plot(
+            x_truth_np[:, 0],
+            x_truth_np[:, 1],
+            x_truth_np[:, 2],
+            label="Ground Truth",
+            linewidth=1.0,
+        )
+        ax.plot(
+            orbit[:, 0],
+            orbit[:, 1],
+            orbit[:, 2],
+            label="Freely Generated",
+            linewidth=1.0,
+            alpha=0.9,
+        )
+        ax.set_title(f"{label}\nDstsp={dstsp:.3f}, DH={dh:.3f}")
+        ax.legend(loc="upper left")
+        ax.axis("off")
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{file_stem}_free_rollout_3d.png", dpi=180)
+        plt.close()
+        np.save(output_dir / f"{file_stem}_orbit.npy", orbit)
+        np.save(output_dir / f"{file_stem}_x_test.npy", x_truth_np)
+        return {
+            "label": label,
+            "file_stem": file_stem,
+            "dstsp": float(dstsp),
+            "dh": float(dh),
+            "orbit_finite": orbit_finite,
+            "orbit_min": float(np.nanmin(orbit)),
+            "orbit_max": float(np.nanmax(orbit)),
+        }
+
+    eval_results = []
+    if args.multi_trajectory:
+        for phi_value in dataset.unique_phi:
+            trajectory_index = int(dataset.indices_by_phi[phi_value][0])
+            x_test_eval, phi_test_eval = dataset.test_trajectory(
+                trajectory_index, length=args.t_gen + args.t_transient
+            )
+            safe_phi = str(float(phi_value)).replace("-", "m").replace(".", "p")
+            eval_results.append(
+                evaluate_test_trajectory(
+                    x_test_eval,
+                    phi_test_eval,
+                    label=f"phi={float(phi_value):+.3f}, traj={trajectory_index}",
+                    file_stem=f"phi_{safe_phi}_traj_{trajectory_index}",
+                )
+            )
+    else:
+        x_test_eval = torch.tensor(X_test, dtype=torch.float32)
+        phi_test_eval = (
+            torch.tensor(phi_test, dtype=torch.float32) if phi_test is not None else None
+        )
+        eval_results.append(
+            evaluate_test_trajectory(
+                x_test_eval,
+                phi_test_eval,
+                label=f"trajectory={args.trajectory_id}",
+                file_stem="single",
+            )
+        )
+
+    primary_result = eval_results[0]
 
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(
             json_ready(
                 {
-                "args": vars(args),
-                "T_train": int(T_train),
-                "T_test": int(T_test),
-                "N": int(N),
-                "final_dstsp": float(dstsp),
-                "final_dh": float(dh),
-                "orbit_finite": orbit_finite,
-                "orbit_min": float(np.nanmin(orbit)),
-                "orbit_max": float(np.nanmax(orbit)),
-                "training": metrics,
+                    "args": vars(args),
+                    "T_train": int(T_train),
+                    "T_test": int(T_test),
+                    "N": int(N),
+                    "phi_dim": int(phi_dim),
+                    "primary_dstsp": primary_result["dstsp"],
+                    "primary_dh": primary_result["dh"],
+                    "evaluation": eval_results,
+                    "training": metrics,
                 }
             ),
             f,
@@ -369,32 +620,22 @@ def main():
         plt.savefig(output_dir / "training_loss.png", dpi=180)
         plt.close()
 
-    fig = plt.figure(figsize=(7, 5))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.plot(
-        X_test[: args.t_gen, 0],
-        X_test[: args.t_gen, 1],
-        X_test[: args.t_gen, 2],
-        label="Ground Truth",
-        linewidth=1.0,
-    )
-    ax.plot(
-        orbit[:, 0],
-        orbit[:, 1],
-        orbit[:, 2],
-        label="Freely Generated",
-        linewidth=1.0,
-        alpha=0.9,
-    )
-    ax.set_title(f"Dstsp={dstsp:.3f}, DH={dh:.3f}")
-    ax.legend(loc="upper left")
-    ax.axis("off")
-    plt.tight_layout()
-    plt.savefig(output_dir / "free_rollout_3d.png", dpi=180)
-    plt.close()
+    if len(eval_results) > 1:
+        labels = [result["label"] for result in eval_results]
+        x_pos = np.arange(len(eval_results))
+        fig, axes = plt.subplots(1, 2, figsize=(max(8, len(eval_results) * 1.4), 4))
+        axes[0].bar(x_pos, [result["dstsp"] for result in eval_results])
+        axes[0].set_title("Dstsp")
+        axes[0].set_xticks(x_pos)
+        axes[0].set_xticklabels(labels, rotation=45, ha="right")
+        axes[1].bar(x_pos, [result["dh"] for result in eval_results])
+        axes[1].set_title("DH")
+        axes[1].set_xticks(x_pos)
+        axes[1].set_xticklabels(labels, rotation=45, ha="right")
+        plt.tight_layout()
+        plt.savefig(output_dir / "per_phi_metrics.png", dpi=180)
+        plt.close()
 
-    np.save(output_dir / "orbit.npy", orbit)
-    np.save(output_dir / "x_test.npy", X_test[: args.t_gen])
     print("Wrote outputs to:", output_dir)
     print("Saved model:", model_path)
 

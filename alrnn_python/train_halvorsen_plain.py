@@ -171,6 +171,7 @@ def train_sh(
     losses = []
     klx = []
     dh = []
+    last_dstsp = float("nan")
 
     with trange(num_epochs, desc="Training Progress") as epochs:
         for e in epochs:
@@ -189,7 +190,7 @@ def train_sh(
 
             scheduler.step()
             average_epoch_loss = sum(epoch_losses) / len(epoch_losses)
-            epochs.set_postfix(loss=average_epoch_loss)
+            epochs.set_postfix(loss=average_epoch_loss, dstsp=last_dstsp)
             losses.append(average_epoch_loss)
 
             if e % ssi == 0:
@@ -204,6 +205,7 @@ def train_sh(
                     z_test_obs = z_test[0, :, 0 : model.N].detach().cpu()
                     x_train_cpu = dataset.X.clone().detach().cpu()
                     klx.append(state_space_divergence_binning(z_test_obs, x_train_cpu))
+                    last_dstsp = klx[-1]
                     dh.append(
                         power_spectrum_error(z_test_obs, x_train_cpu[0:10000, :])
                     )

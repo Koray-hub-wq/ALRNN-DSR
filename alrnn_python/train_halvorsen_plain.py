@@ -40,11 +40,28 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Skip training and evaluate output-dir/model.pt.",
+    )
+    parser.add_argument(
         "--force-cpu",
         action="store_true",
         help="Disable CUDA even if it is available.",
     )
     return parser.parse_args()
+
+
+def json_ready(value):
+    if isinstance(value, dict):
+        return {key: json_ready(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [json_ready(val) for val in value]
+    if isinstance(value, tuple):
+        return [json_ready(val) for val in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 args = parse_args()
@@ -249,6 +266,7 @@ def main():
     model = AL_RNN(M=args.latent_dim, P=args.pwl_units, N=N, phi_dim=phi_dim).to(
         device
     )
+    model_path = output_dir / "model.pt"
     dataset = TimeSeriesDataset(
         X_train,
         external_inputs=phi_train,
@@ -256,28 +274,32 @@ def main():
         batch_size=args.batch_size,
     )
 
-    optimizer = torch.optim.RAdam(model.parameters(), lr=args.start_lr)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(
-        optimizer, gamma=np.exp(np.log(args.end_lr / args.start_lr) / args.epochs)
-    )
-    loss_fn = nn.MSELoss()
+    if args.eval_only:
+        print("Eval-only mode: loading model from", model_path)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        metrics = {"losses": [], "dstsp": [], "dh": []}
+    else:
+        optimizer = torch.optim.RAdam(model.parameters(), lr=args.start_lr)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer, gamma=np.exp(np.log(args.end_lr / args.start_lr) / args.epochs)
+        )
+        loss_fn = nn.MSELoss()
 
-    metrics = train_sh(
-        model,
-        dataset,
-        optimizer,
-        scheduler,
-        loss_fn,
-        num_epochs=args.epochs,
-        alpha=1,
-        n_interleave=args.teacher_forcing_interval,
-        device=device,
-        batches_per_epoch=args.batches_per_epoch,
-        ssi=args.ssi,
-    )
+        metrics = train_sh(
+            model,
+            dataset,
+            optimizer,
+            scheduler,
+            loss_fn,
+            num_epochs=args.epochs,
+            alpha=1,
+            n_interleave=args.teacher_forcing_interval,
+            device=device,
+            batches_per_epoch=args.batches_per_epoch,
+            ssi=args.ssi,
+        )
 
-    model_path = output_dir / "model.pt"
-    torch.save(model.state_dict(), model_path)
+        torch.save(model.state_dict(), model_path)
 
     X_test_torch = torch.tensor(X_test[:], device=device).unsqueeze(0)
     phi_test_torch = (
@@ -318,7 +340,8 @@ def main():
 
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(
-            {
+            json_ready(
+                {
                 "args": vars(args),
                 "T_train": int(T_train),
                 "T_test": int(T_test),
@@ -329,20 +352,22 @@ def main():
                 "orbit_min": float(np.nanmin(orbit)),
                 "orbit_max": float(np.nanmax(orbit)),
                 "training": metrics,
-            },
+                }
+            ),
             f,
             indent=2,
         )
 
-    plt.figure(figsize=(7, 4))
-    plt.plot(metrics["losses"], lw=2)
-    plt.yscale("log")
-    plt.xlabel("epoch")
-    plt.ylabel("loss")
-    plt.title("Training loss")
-    plt.tight_layout()
-    plt.savefig(output_dir / "training_loss.png", dpi=180)
-    plt.close()
+    if metrics["losses"]:
+        plt.figure(figsize=(7, 4))
+        plt.plot(metrics["losses"], lw=2)
+        plt.yscale("log")
+        plt.xlabel("epoch")
+        plt.ylabel("loss")
+        plt.title("Training loss")
+        plt.tight_layout()
+        plt.savefig(output_dir / "training_loss.png", dpi=180)
+        plt.close()
 
     fig = plt.figure(figsize=(7, 5))
     ax = fig.add_subplot(111, projection="3d")

@@ -1,0 +1,48 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Notebook runtime artifacts
+.ipynb_checkpoints/
+* executed.ipynb
+
+# Generated experiment outputs
+runs/
+Results/
+alrnn_python/runs/
+
+# Model checkpoints and serialized training artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bson
+*.jld
+*.jld2
+
+# Large generated arrays/data dumps
+*.npy
+*.npz
+
+# Generated figures/logs
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+*.log
+*.out
+*.err

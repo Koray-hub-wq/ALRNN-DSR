@@ -31,6 +31,13 @@ def parse_args():
         action="store_true",
         help="Disable balanced per-phi sampling for multi-trajectory data.",
     )
+    parser.add_argument(
+        "--train-phi-values",
+        type=float,
+        nargs="*",
+        default=None,
+        help="Restrict multi-trajectory training to these phi constants, e.g. --train-phi-values -1 -0.75 -0.5. Evaluation still covers all phi values.",
+    )
     parser.add_argument("--trajectory-id", type=int, default=0)
     parser.add_argument("--split-idx", type=int, default=80000)
     parser.add_argument("--latent-dim", "-M", type=int, default=20)
@@ -151,31 +158,48 @@ class MultiTrajectoryDataset:
         batch_size=20,
         split_idx=80000,
         balanced_phi=True,
+        train_indices=None,
     ):
-        self.X = torch.tensor(data[:, :split_idx, :], dtype=torch.float32)
+        self.X_all = torch.tensor(data[:, :split_idx, :], dtype=torch.float32)
         self.X_test = torch.tensor(data[:, split_idx:, :], dtype=torch.float32)
+        self.num_all_trajectories = self.X_all.shape[0]
+        if train_indices is None:
+            self.train_indices = np.arange(self.num_all_trajectories)
+        else:
+            self.train_indices = np.asarray(train_indices, dtype=np.int64)
+        self.X = self.X_all[self.train_indices]
         self.num_trajectories, self.total_time_steps, _ = self.X.shape
         self.sequence_length = sequence_length
         self.batch_size = batch_size
         self.balanced_phi = balanced_phi
 
         if external_inputs is not None:
-            self.S = torch.tensor(external_inputs[:, :split_idx, :], dtype=torch.float32)
+            self.S_all = torch.tensor(
+                external_inputs[:, :split_idx, :], dtype=torch.float32
+            )
             self.S_test = torch.tensor(
                 external_inputs[:, split_idx:, :], dtype=torch.float32
             )
+            self.S = self.S_all[self.train_indices]
             assert self.X.shape[:2] == self.S.shape[:2]
         else:
+            self.S_all = None
             self.S = None
             self.S_test = None
 
         if phi_constants is None:
-            self.phi_constants = np.arange(self.num_trajectories)
+            self.phi_constants_all = np.arange(self.num_all_trajectories)
         else:
-            self.phi_constants = np.asarray(phi_constants)
+            self.phi_constants_all = np.asarray(phi_constants)
+        self.phi_constants = self.phi_constants_all[self.train_indices]
         self.unique_phi = np.unique(self.phi_constants)
         self.indices_by_phi = {
             phi: np.where(self.phi_constants == phi)[0] for phi in self.unique_phi
+        }
+        self.eval_unique_phi = np.unique(self.phi_constants_all)
+        self.eval_indices_by_phi = {
+            phi: np.where(self.phi_constants_all == phi)[0]
+            for phi in self.eval_unique_phi
         }
 
     def __len__(self):
@@ -424,6 +448,18 @@ def main():
         X_train_shape = trajectories[:, : args.split_idx, :].shape
         X_test_shape = trajectories[:, args.split_idx :, :].shape
         phi_dim = 0 if all_phi is None else all_phi.shape[-1]
+        train_indices = None
+        if args.train_phi_values is not None:
+            if phi_constants is None:
+                raise ValueError("--train-phi-values requires trajectory_phi_constants.npy")
+            train_mask = np.zeros_like(phi_constants, dtype=bool)
+            for phi_value in args.train_phi_values:
+                train_mask |= np.isclose(phi_constants, phi_value, atol=1e-5)
+            train_indices = np.where(train_mask)[0]
+            if len(train_indices) == 0:
+                raise ValueError(
+                    f"No trajectories match --train-phi-values {args.train_phi_values}"
+                )
         dataset = MultiTrajectoryDataset(
             trajectories,
             external_inputs=all_phi,
@@ -432,13 +468,16 @@ def main():
             batch_size=args.batch_size,
             split_idx=args.split_idx,
             balanced_phi=not args.no_balanced_phi,
+            train_indices=train_indices,
         )
         T_train = X_train_shape[1]
         T_test = X_test_shape[1]
         N = X_train_shape[-1]
         print("Multi-trajectory mode")
         print("X_train:", X_train_shape, "X_test:", X_test_shape)
-        print("unique phi:", dataset.unique_phi)
+        print("train trajectories:", dataset.train_indices.tolist())
+        print("train unique phi:", dataset.unique_phi)
+        print("eval unique phi:", dataset.eval_unique_phi)
         print("balanced phi sampling:", dataset.balanced_phi)
     else:
         X = trajectories[args.trajectory_id]
@@ -560,8 +599,8 @@ def main():
 
     eval_results = []
     if args.multi_trajectory:
-        for phi_value in dataset.unique_phi:
-            trajectory_index = int(dataset.indices_by_phi[phi_value][0])
+        for phi_value in dataset.eval_unique_phi:
+            trajectory_index = int(dataset.eval_indices_by_phi[phi_value][0])
             x_test_eval, phi_test_eval = dataset.test_trajectory(
                 trajectory_index, length=args.t_gen + args.t_transient
             )

@@ -4,18 +4,25 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DATA_DIR="/export/home/klenkeit/training_data/single_halvorsen_constparams/14to209_noisy_9params_trajectories"
+gpu_id=0
+latents_dim=200
+epochs=1000
+pwl_units=20
+batch_size=80
+batches_per_epoch=100
+
 
 COMMON_ARGS=(
   --data-dir "$DATA_DIR"
   --multi-trajectory
   --use-phi
-  --gpu-id 0
+  --gpu-id "$gpu_id"
   --cpu-threads 4
-  --latent-dim 100
-  --pwl-units 10
-  --batch-size 24
-  --epochs 2000
-  --batches-per-epoch 50
+  --latent-dim "$latents_dim"
+  --pwl-units "$pwl_units"
+  --batch-size "$batch_size"
+  --epochs "$epochs"
+  --batches-per-epoch "$batches_per_epoch"
 )
 
 python train_halvorsen_plain.py \
@@ -31,13 +38,13 @@ python train_halvorsen_plain.py \
 VANILLA_ARGS=(
   --data-dir "$DATA_DIR"
   --multi-trajectory
-  --gpu-id 0
+  --gpu-id "$gpu_id"
   --cpu-threads 4
-  --latent-dim 100
-  --pwl-units 10
-  --batch-size 24
-  --epochs 2000
-  --batches-per-epoch 50
+  --latent-dim "$latents_dim"
+  --pwl-units "$pwl_units"
+  --batch-size "$batch_size"
+  --epochs "$epochs"
+  --batches-per-epoch "$batches_per_epoch"
 )
 
 python train_halvorsen_plain.py \

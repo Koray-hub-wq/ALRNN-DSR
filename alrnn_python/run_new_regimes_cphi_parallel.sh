@@ -7,7 +7,7 @@ BTIP_REPO="$ROOT_DIR/DynaMix-python-b-tipping"
 source "$BTIP_REPO/venv/bin/activate"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TRAINING_DATA_ROOT="${TRAINING_DATA_ROOT:-$ROOT_DIR/training_data/single_new_regimes_const}"
+TRAINING_DATA_ROOT="${TRAINING_DATA_ROOT:-$ROOT_DIR/training_data/single_new_regimes_const/trajectories}"
 BIFURCATION_DIR="${BIFURCATION_DIR:-$ROOT_DIR/diffrentbutconst_prams}"
 OUTPUT_DIR="$SCRIPT_DIR/bifurcation_diagrams/alrnn_cphi"
 LOG_DIR="$SCRIPT_DIR/runs/new_regimes_cphi_logs"
@@ -31,6 +31,14 @@ export PYTHONUNBUFFERED=1
 REGIMES=(dadras_e_49_to_64 tsucs1_e_20_to_245)
 GPU_IDS=("$dadras_gpu" "$tsucs1_gpu")
 
+regime_data_dir() {
+  local directory="$TRAINING_DATA_ROOT/$1"
+  if [[ ! -f "$directory/trajectories.npy" && -d "$directory/values_8" ]]; then
+    directory="$directory/values_8"
+  fi
+  printf '%s\n' "$directory"
+}
+
 for required_file in \
   "$SCRIPT_DIR/train_halvorsen_plain.py" \
   "$BIFURCATION_DIR/compare_model_bifurcation_diagrams.py"; do
@@ -40,9 +48,10 @@ for required_file in \
   fi
 done
 for regime in "${REGIMES[@]}"; do
+  data_dir="$(regime_data_dir "$regime")"
   for filename in trajectories.npy trajectory_phi.npy trajectory_phi_constants.npy metadata.json; do
-    if [[ ! -f "$TRAINING_DATA_ROOT/$regime/values_8/$filename" ]]; then
-      printf 'Missing required file: %s\n' "$TRAINING_DATA_ROOT/$regime/values_8/$filename" >&2
+    if [[ ! -f "$data_dir/$filename" ]]; then
+      printf 'Missing required file: %s\n' "$data_dir/$filename" >&2
       exit 1
     fi
   done
@@ -67,7 +76,8 @@ PY
 run_regime() {
   local regime="$1"
   local gpu_id="$2"
-  local data_dir="$TRAINING_DATA_ROOT/$regime/values_8"
+  local data_dir
+  data_dir="$(regime_data_dir "$regime")"
   local run_root="$SCRIPT_DIR/runs/$regime"
   local output_dir="$OUTPUT_DIR/$regime"
   local phi_groups

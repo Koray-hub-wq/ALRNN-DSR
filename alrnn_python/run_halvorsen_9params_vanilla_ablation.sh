@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Activate the Python environment before starting. Optional first argument: GPU ID.
+# Optional first argument: GPU ID.
 # Example: bash run_halvorsen_9params_vanilla_ablation.sh 0
+ROOT_DIR="${ROOT_DIR:-$HOME}"
+BTIP_REPO="$ROOT_DIR/DynaMix-python-b-tipping"
+source "$BTIP_REPO/venv/bin/activate"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="/export/home/klenkeit/training_data/single_halvorsen_constparams/14to209_noisy_9params_trajectories"
 BIFURCATION_DIR="/export/home/klenkeit/diffrentbutconst_prams"

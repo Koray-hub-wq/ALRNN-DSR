@@ -146,7 +146,11 @@ Outputs:
 
 - `rollout_3d.html`: rotatable 3D overlay of truth and all models, including
   step/phi hover information. Legend entries can hide or isolate models.
+  Each trajectory has its own light-to-dark color scale encoding the current phi.
 - `components.html`: x, y, z and phi versus step, with linked horizontal zoom.
+  State samples use the same phi-dependent color gradients as the 3D plot.
+- `model_XX_LABEL_rollout_3d.png`: one static 3D overlay per model, showing its
+  prediction against the ground truth, with separate phi colorbars (200 dpi).
 - `model_XX_LABEL.npz`: aligned model-coordinate and physical predictions,
   phi and time arrays, saved before metrics/plots.
 - `metrics.json`: ground-truth SHA256, simulation settings, model weight hashes,
@@ -155,6 +159,13 @@ Outputs:
 
 All states are plotted without downsampling. Use `--plot-space physical` to
 display observations and predictions in physical observation units.
+
+Ground truth uses light-to-dark blue; models use orange, green, purple and other
+distinct color families. Lighter colors always mean lower phi, darker colors
+higher phi, using one shared numeric range across all trajectories. Colors track
+the actual parameter, not elapsed time, so a decreasing drift becomes lighter
+again. Static line segments use the mean phi of their two endpoints; HTML 3D
+lines interpolate the colors between samples. Non-finite gaps are not connected.
 
 ## Other Regimes And Drift Shapes
 

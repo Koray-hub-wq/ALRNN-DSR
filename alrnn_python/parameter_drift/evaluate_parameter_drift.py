@@ -416,6 +416,69 @@ def plot_values(values):
     return [float(value) if np.isfinite(value) else None for value in array]
 
 
+def model_file_stem(index, label):
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("._")[:100] or "model"
+    return f"model_{index:02d}_{slug}"
+
+
+def trajectory_palette(name):
+    from matplotlib import colormaps
+    from matplotlib.colors import LinearSegmentedColormap, to_hex
+
+    # Avoid almost-white low-parameter values on white figure backgrounds.
+    colors = [to_hex(colormaps[name](value)) for value in np.linspace(0.35, 0.95, 16)]
+    cmap = LinearSegmentedColormap.from_list(f"drift_{name}", colors)
+    return dict(cmap=cmap, colorscale=[[index / 15, color] for index, color in enumerate(colors)],
+                color=to_hex(cmap(0.6)))
+
+
+def colored_segments(values, phi):
+    segments = np.stack((values[:-1], values[1:]), axis=1)
+    colors = (phi[:-1].astype(np.float64) + phi[1:]) / 2
+    finite = np.isfinite(segments).all(axis=(1, 2)) & np.isfinite(colors)
+    return segments[finite], colors[finite]
+
+
+def save_static_3d(path, truth, prediction, phi, truth_palette, model_palette, bounds, title):
+    import textwrap
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    from matplotlib.lines import Line2D
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+    norm = Normalize(*bounds)
+    fig = plt.figure(figsize=(10, 7))
+    try:
+        ax = fig.add_subplot(111, projection="3d")
+        for values, palette in ((truth, truth_palette), (prediction, model_palette)):
+            segments, colors = colored_segments(values, phi)
+            collection = Line3DCollection(segments, cmap=palette["cmap"], norm=norm, linewidths=0.8)
+            collection.set_array(colors)
+            ax.add_collection3d(collection)
+        points = np.concatenate((truth, prediction))
+        points = points[np.isfinite(points).all(axis=1)]
+        if len(points):
+            ax.auto_scale_xyz(points[:, 0], points[:, 1], points[:, 2])
+            extent = np.ptp(points, axis=0)
+            ax.set_box_aspect(np.where(extent > 0, extent, 1))
+        ax.set(xlabel="x", ylabel="y", zlabel="z")
+        ax.legend(handles=[Line2D([], [], color=palette["color"], label=label)
+                           for label, palette in (("Ground truth", truth_palette), ("Model prediction", model_palette))],
+                  loc="upper left")
+        fig.suptitle("\n".join(textwrap.wrap(title, width=100)), fontsize=11)
+        fig.subplots_adjust(left=0.0, right=0.76, bottom=0.05, top=0.85)
+        for index, (label, palette) in enumerate((("Ground truth", truth_palette), ("Prediction", model_palette))):
+            cax = fig.add_axes([0.80 + index * 0.10, 0.19, 0.018, 0.55])
+            bar = fig.colorbar(ScalarMappable(norm=norm, cmap=palette["cmap"]), cax=cax)
+            bar.set_label(r"$\phi$ (" + label + ")", fontsize=9)
+            bar.set_ticks(np.linspace(bounds[0], bounds[1], 3) if np.ptp(phi) else [float(phi[0])])
+            bar.ax.tick_params(labelsize=8)
+        fig.savefig(path, dpi=200)
+    finally:
+        plt.close(fig)
+
+
 def write_plot(path, title, traces, layout, plotly_js=None):
     script = ("<script>" + Path(plotly_js).read_text(encoding="utf-8") + "</script>") if plotly_js is not None else '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
     figure = json.dumps(dict(data=traces, layout=layout), allow_nan=False).replace("<", "\\u003c")
@@ -431,33 +494,47 @@ Plotly.newPlot('figure',figure.data,figure.layout,{{responsive:true,displaylogo:
 
 def save_plots(output_dir, arrays, models, metadata, space="standardized", plotly_js=None):
     truth = arrays["x"] if space == "standardized" else arrays["observed"]
-    colors = ["#d95f02", "#1b9e77", "#984ea3", "#e7298a", "#666666", "#a6761d"]
-    series = [("Ground truth", truth, "#1764a1")]
+    phi = np.asarray(arrays["phi"])
+    lower, upper = float(np.min(phi)), float(np.max(phi))
+    bounds = (lower, upper) if lower < upper else (lower - 0.5, upper + 0.5)
+    palette_names = ["Oranges", "Greens", "Purples", "RdPu", "Greys", "YlOrBr"]
+    series = [("Ground truth", truth, trajectory_palette("Blues"))]
     for index, result in enumerate(models):
         prediction = result["prediction"]
         if space == "physical":
             prediction = prediction.astype(np.float64) * arrays["std"] + arrays["mean"]
-        series.append((result["label"], prediction, colors[index % len(colors)]))
+        series.append((result["label"], prediction, trajectory_palette(palette_names[index % len(palette_names)])))
     spec = metadata["simulation"]
     title = f"{spec['regime']} | {spec['drift']} parameter drift | {space}"
     traces_3d = []
-    for label, values, color in series:
+    for index, (label, values, palette) in enumerate(series):
+        colorbar_title = "phi: Ground truth" if index == 0 else f"phi: Model {index}"
         traces_3d.append(dict(type="scatter3d", mode="lines", name=label,
                               x=plot_values(values[:, 0]), y=plot_values(values[:, 1]), z=plot_values(values[:, 2]),
-                              line=dict(color=color, width=3), connectgaps=False,
-                              customdata=np.column_stack((np.arange(len(truth)), arrays["phi"])).tolist(),
+                              line=dict(color=plot_values(phi), colorscale=palette["colorscale"],
+                                        cmin=bounds[0], cmax=bounds[1], width=3, showscale=True,
+                                        colorbar=dict(title=dict(text=colorbar_title, side="right"),
+                                                      x=1.02, y=1 - (index + 0.5) / len(series),
+                                                      len=0.85 / len(series), thickness=12,
+                                                      tickvals=[lower, upper] if lower < upper else [lower],
+                                                      tickfont=dict(size=10))), connectgaps=False,
+                              customdata=np.column_stack((np.arange(len(truth)), phi)).tolist(),
                               hovertemplate="step=%{customdata[0]}<br>phi=%{customdata[1]:.4f}<br>x=%{x:.4f}<br>y=%{y:.4f}<br>z=%{z:.4f}<extra>%{fullData.name}</extra>"))
     write_plot(output_dir / "rollout_3d.html", title, traces_3d,
                dict(title=dict(text=title), scene=dict(xaxis=dict(title="x"), yaxis=dict(title="y"), zaxis=dict(title="z"), aspectmode="data"),
-                    margin=dict(l=0, r=0, b=0, t=65), legend=dict(orientation="h")), plotly_js)
+                    margin=dict(l=0, r=160, b=0, t=100), legend=dict(orientation="h", y=1.05)), plotly_js)
     traces = []
     steps = np.arange(len(truth)).tolist()
     for component in range(3):
         suffix = "" if component == 0 else str(component + 1)
-        for label, values, color in series:
-            traces.append(dict(type="scattergl", mode="lines", name=label, legendgroup=label,
+        for label, values, palette in series:
+            traces.append(dict(type="scattergl", mode="lines+markers", name=label, legendgroup=label,
                                showlegend=component == 0, x=steps, y=plot_values(values[:, component]),
-                               xaxis=f"x{suffix}", yaxis=f"y{suffix}", line=dict(color=color, width=1.2), connectgaps=False))
+                               xaxis=f"x{suffix}", yaxis=f"y{suffix}", line=dict(color=palette["color"], width=0.5),
+                               marker=dict(color=plot_values(phi), colorscale=palette["colorscale"],
+                                           cmin=bounds[0], cmax=bounds[1], size=2, showscale=False),
+                               customdata=plot_values(phi), connectgaps=False,
+                               hovertemplate="step=%{x}<br>value=%{y:.4f}<br>phi=%{customdata:.4f}<extra>%{fullData.name}</extra>"))
     traces.append(dict(type="scattergl", mode="lines", name="phi", x=steps, y=plot_values(arrays["phi"]),
                        xaxis="x4", yaxis="y4", line=dict(color="#333333", width=2)))
     layout = dict(title=dict(text=title), grid=dict(rows=4, columns=1, pattern="independent"),
@@ -467,6 +544,10 @@ def save_plots(output_dir, arrays, models, metadata, space="standardized", plotl
         layout[f"yaxis{suffix}"] = dict(title=label)
         layout[f"xaxis{suffix}"] = dict(title="step" if row == 4 else None, matches="x4" if row != 4 else None)
     write_plot(output_dir / "components.html", title, traces, layout, plotly_js)
+    for index, (label, values, palette) in enumerate(series[1:], start=1):
+        path = output_dir / f"{model_file_stem(index, label)}_rollout_3d.png"
+        save_static_3d(path, truth, values, phi, series[0][2], palette, bounds,
+                       f"{spec['regime']} | {label} | {space}")
 
 
 def main(argv=None):
@@ -512,8 +593,7 @@ def main(argv=None):
         model, info = load_model(run_dir, device)
         print(f"[{index}/{len(labels)}] {label}: M={model.M}, P={model.P}, phi_dim={model.phi_dim}", flush=True)
         prediction, failed_at = rollout(model, arrays["x"][0], arrays["phi"], device)
-        slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("._")[:100] or "model"
-        filename = f"model_{index:02d}_{slug}.npz"
+        filename = f"{model_file_stem(index, label)}.npz"
         np.savez_compressed(args.output_dir / filename, prediction=prediction,
                             prediction_physical=prediction.astype(np.float64) * arrays["std"] + arrays["mean"],
                             phi=arrays["phi"], times=arrays["times"])
@@ -533,7 +613,7 @@ def main(argv=None):
             for row in model["metrics"]:
                 writer.writerow(dict(model=model["label"], **row))
     save_plots(args.output_dir, arrays, plot_models, metadata, args.plot_space, args.plotly_js)
-    print(f"Saved predictions, metrics.json, metrics.csv, rollout_3d.html and components.html to {args.output_dir.resolve()}", flush=True)
+    print(f"Saved predictions, metrics, shared HTML plots and one 3D PNG per model to {args.output_dir.resolve()}", flush=True)
     if args.plotly_js is None:
         print("HTML plots load Plotly from its CDN when opened. Use --plotly-js plotly.min.js for offline HTML.")
 

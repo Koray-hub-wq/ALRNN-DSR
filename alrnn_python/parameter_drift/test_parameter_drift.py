@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -119,6 +120,47 @@ class ParameterDriftTests(unittest.TestCase):
             result, failed = drift.rollout(model, [1, 2, 3], [0, 0, 0], "cpu")
             self.assertEqual(failed, 1)
             self.assertTrue(np.isnan(result[1:]).all())
+
+    def test_parameter_colors_and_static_png_per_model(self):
+        from matplotlib.image import imread
+
+        steps = np.linspace(0, 4 * np.pi, 40)
+        truth = np.column_stack((np.cos(steps), np.sin(steps), steps / 10))
+        phi = np.r_[np.linspace(-1, 1, 20), np.linspace(1, -1, 20)]
+        arrays = dict(x=truth, observed=truth, phi=phi, mean=np.zeros(3), std=np.ones(3))
+        first = truth + 0.1
+        first[10:12] = np.nan
+        models = [dict(label="Model A", prediction=first), dict(label="Model B", prediction=truth - 0.1)]
+        metadata = dict(simulation=dict(regime="test_flow", drift="linear"))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            drift.save_plots(output, arrays, models, metadata)
+            pngs = sorted(output.glob("*_rollout_3d.png"))
+            self.assertEqual([p.name for p in pngs], ["model_01_Model_A_rollout_3d.png", "model_02_Model_B_rollout_3d.png"])
+            for path in pngs:
+                pixels = imread(path)
+                self.assertGreater(pixels[:, :, :3].std(), 0.02)
+                self.assertEqual(pixels.shape[:2], (1400, 2000))
+            page = (output / "rollout_3d.html").read_text(encoding="utf-8")
+            figure = json.loads(re.search(r"const figure=(.*?);\nPlotly.newPlot", page, re.S).group(1))
+            self.assertEqual(len(figure["data"]), 3)
+            for trace in figure["data"]:
+                np.testing.assert_array_equal(trace["line"]["color"], phi)
+                self.assertEqual((trace["line"]["cmin"], trace["line"]["cmax"]), (-1, 1))
+                self.assertTrue(trace["line"]["showscale"])
+            self.assertNotEqual(figure["data"][0]["line"]["colorscale"], figure["data"][1]["line"]["colorscale"])
+            page = (output / "components.html").read_text(encoding="utf-8")
+            figure = json.loads(re.search(r"const figure=(.*?);\nPlotly.newPlot", page, re.S).group(1))
+            self.assertEqual(len(figure["data"]), 10)
+            np.testing.assert_array_equal(figure["data"][0]["marker"]["color"], phi)
+
+    def test_colored_segments_do_not_bridge_nonfinite_gaps(self):
+        values = np.arange(15, dtype=float).reshape(5, 3)
+        values[2] = np.nan
+        segments, colors = drift.colored_segments(values, np.array([0, 2, 4, 6, 8]))
+        self.assertEqual(segments.shape, (2, 2, 3))
+        self.assertTrue(np.isfinite(segments).all())
+        np.testing.assert_array_equal(colors, [1, 7])
 
 
 if __name__ == "__main__":

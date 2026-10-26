@@ -14,14 +14,13 @@ DATA_DIR="$TRAINING_DATA_ROOT/$regime"
 if [[ ! -f "$DATA_DIR/trajectories.npy" && -d "$DATA_DIR/values_8" ]]; then
   DATA_DIR="$DATA_DIR/values_8"
 fi
-OUTPUT_DIR="$SCRIPT_DIR/bifurcation_diagrams/alrnn_cphi/$regime/without_phi1"
 python_bin="${PYTHON_BIN:-python}"
 gpu_id="${1:-${GPU_ID:-0}}"
 
-# Match the current new-regimes training settings.
-latents_dim=300
+# Training settings.
+latents_dim=200
 epochs=1000
-pwl_units=30
+pwl_units=20
 batch_size=80
 batches_per_epoch=100
 cpu_threads=4
@@ -34,6 +33,7 @@ export PYTHONUNBUFFERED=1
 
 RUN_ALL="$SCRIPT_DIR/runs/$regime/all_without_phi1_m${latents_dim}_p${pwl_units}_cphi"
 RUN_POSITIVE="$SCRIPT_DIR/runs/$regime/positive_without_phi1_m${latents_dim}_p${pwl_units}_cphi"
+OUTPUT_DIR="$SCRIPT_DIR/bifurcation_diagrams/alrnn_cphi/$regime/without_phi1_m${latents_dim}_p${pwl_units}"
 
 for required_file in \
   "$SCRIPT_DIR/train_halvorsen_plain.py" \
@@ -113,19 +113,20 @@ printf '\nTraining Dadras with Cphi on all values except phi=+1: %s\n' "${all_ph
   --train-phi-values "${all_phi[@]}" \
   --output-dir "$RUN_ALL"
 
-printf '\nTraining Dadras with Cphi on positive values except phi=+1: %s\n' "${positive_phi[*]}"
-"$python_bin" "$SCRIPT_DIR/train_halvorsen_plain.py" \
-  "${COMMON_ARGS[@]}" \
-  --train-phi-values "${positive_phi[@]}" \
-  --output-dir "$RUN_POSITIVE"
+# Optional positive-only training (disabled).
+# printf '\nTraining Dadras with Cphi on positive values except phi=+1: %s\n' "${positive_phi[*]}"
+# "$python_bin" "$SCRIPT_DIR/train_halvorsen_plain.py" \
+#   "${COMMON_ARGS[@]}" \
+#   --train-phi-values "${positive_phi[@]}" \
+#   --output-dir "$RUN_POSITIVE"
 
-printf '\nComparing Dadras bifurcation diagrams for e in [4.9, 6.2]\n'
+printf '\nComparing Dadras AL-RNN with ground truth for e in [4.9, 6.2]\n'
 cd "$BIFURCATION_DIR"
 "$python_bin" compare_model_bifurcation_diagrams.py \
   --model-type alrnn \
   --regime "$regime" \
-  --model-runs "$RUN_ALL" "$RUN_POSITIVE" \
-  --model-labels "Cphi: all except phi=+1" "Cphi: positive except phi=+1" \
+  --model-runs "$RUN_ALL" \
+  --model-labels "Cphi: all except phi=+1" \
   --parameter-min 4.9 \
   --parameter-max 6.2 \
   --components z \

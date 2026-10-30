@@ -24,6 +24,7 @@ RUN_DIR="$SCRIPT_DIR/runs/halvorsen_9params_train_m0p75_m200_p20_cphi"
 
 for required_file in \
   "$SCRIPT_DIR/train_halvorsen_plain.py" \
+  "$SCRIPT_DIR/compare_model_bifurcation_diagrams.py" \
   "$DATA_DIR/trajectories.npy" \
   "$DATA_DIR/trajectory_phi.npy" \
   "$DATA_DIR/trajectory_phi_constants.npy" \
@@ -52,7 +53,8 @@ printf '\nTraining AL-RNN with Cphi on phi = -0.75 (GPU %s)\n' "$gpu_id"
 
 printf '\nCreating the bifurcation diagram for the single-phi Cphi model\n'
 cd "$BIFURCATION_DIR"
-"$python_bin" compare_model_bifurcation_diagrams.py \
+"$python_bin" "$SCRIPT_DIR/compare_model_bifurcation_diagrams.py" \
+  --backend-script "$BIFURCATION_DIR/compare_model_bifurcation_diagrams.py" \
   --model-type alrnn \
   --regime halvorsen \
   --model-runs "$RUN_DIR" \

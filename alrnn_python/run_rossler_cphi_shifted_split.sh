@@ -39,6 +39,7 @@ RUN_POSITIVE="$RUN_ROOT/positive_plus_m0p142857_m${latents_dim}_p${pwl_units}_cp
 
 for required_file in \
   "$SCRIPT_DIR/train_halvorsen_plain.py" \
+  "$SCRIPT_DIR/compare_model_bifurcation_diagrams.py" \
   "$DATA_DIR/trajectories.npy" \
   "$DATA_DIR/trajectory_phi.npy" \
   "$DATA_DIR/trajectory_phi_constants.npy" \
@@ -131,7 +132,8 @@ done
 
 printf '\nComparing Rossler bifurcation diagrams for a in [0.05, 0.35]\n' | tee -a "$LOG_FILE"
 cd "$BIFURCATION_DIR"
-"$python_bin" compare_model_bifurcation_diagrams.py \
+"$python_bin" "$SCRIPT_DIR/compare_model_bifurcation_diagrams.py" \
+  --backend-script "$BIFURCATION_DIR/compare_model_bifurcation_diagrams.py" \
   --model-type alrnn \
   --regime "$regime" \
   --model-runs "$RUN_ALL" "$RUN_NEGATIVE" "$RUN_POSITIVE" \

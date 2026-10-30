@@ -19,7 +19,7 @@ gpu_id="${1:-${GPU_ID:-0}}"
 
 # Training settings.
 latents_dim=200
-epochs=1000
+epochs=750
 pwl_units=20
 batch_size=80
 batches_per_epoch=100
@@ -37,6 +37,7 @@ OUTPUT_DIR="$SCRIPT_DIR/bifurcation_diagrams/alrnn_cphi/$regime/without_phi1_m${
 
 for required_file in \
   "$SCRIPT_DIR/train_halvorsen_plain.py" \
+  "$SCRIPT_DIR/compare_model_bifurcation_diagrams.py" \
   "$DATA_DIR/trajectories.npy" \
   "$DATA_DIR/trajectory_phi.npy" \
   "$DATA_DIR/trajectory_phi_constants.npy" \
@@ -122,7 +123,8 @@ printf '\nTraining Dadras with Cphi on all values except phi=+1: %s\n' "${all_ph
 
 printf '\nComparing Dadras AL-RNN with ground truth for e in [4.9, 6.2]\n'
 cd "$BIFURCATION_DIR"
-"$python_bin" compare_model_bifurcation_diagrams.py \
+"$python_bin" "$SCRIPT_DIR/compare_model_bifurcation_diagrams.py" \
+  --backend-script "$BIFURCATION_DIR/compare_model_bifurcation_diagrams.py" \
   --model-type alrnn \
   --regime "$regime" \
   --model-runs "$RUN_ALL" \
